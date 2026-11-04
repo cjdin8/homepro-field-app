@@ -325,7 +325,7 @@ function reviewDeal() {
       <tr><td>Contract price</td><td>${usd(p.price)}</td></tr><tr><td>Deposit</td><td>${usd(p.deposit)}</td></tr>
       <tr class="total"><td>Unpaid balance (${esc(p.payType)})</td><td>${usd(p.price - p.deposit)}</td></tr>
     </table>
-    <button class="btn secondary" id="prev">Preview the packet PDF</button>
+    <button class="btn secondary" id="prev">Preview the packet</button>
   </div>
   <h2>Homeowner · ${esc(p.customer.first)} ${esc(p.customer.last)}</h2>${sigHTML("s1")}
   ${p.customer2 ? `<h2>Homeowner · ${esc(p.customer2.first)} ${esc(p.customer2.last)}</h2>${sigHTML("s2")}` : ""}
@@ -336,12 +336,10 @@ function reviewDeal() {
   if (p.customer2) pads.owner2 = signaturePad($("#s2"));
   const body = () => ({ deal: { ...p, signatures: Object.fromEntries(Object.entries(pads).map(([k, v]) => [k, v.toDataURL()])) }, photos: D.photos.map((x, i) => ({ key: x.key, caption: `Staircase photo ${i + 1}` })), idPhoto: p.payType === "Finance" && D.idPhoto ? { key: D.idPhoto.key } : null });
   $("#prev").onclick = async () => {
-    const pn = `PREVIEW ${subject}.pdf`;
-    if (readyFile && readyFile.name === safeName(pn)) { const f = readyFile; readyFile = null; return sharePdf(f, pn); }
     const b = $("#prev"); b.disabled = true; b.innerHTML = '<span class="spinner"></span>';
-    try { const r = await api("/preview", body(), true); await sharePdf(await r.blob(), pn); }
+    try { const r = await api("/preview", body(), true); await viewPdf(await r.blob(), `PREVIEW ${subject}.pdf`, "Preview (not sent yet)"); }
     catch (e) { toast(e.message); }
-    b.disabled = false; b.textContent = "Preview the packet PDF";
+    b.disabled = false; b.textContent = "Preview the packet";
   };
   $("#go").onclick = async () => {
     if (pads.owner1.isEmpty()) return toast("Homeowner needs to sign");
@@ -363,11 +361,17 @@ function done(d) {
   const missing = d.ghl?.missing || [];
   app.innerHTML = `<div class="card" style="text-align:center;padding:26px 16px"><div style="font-size:40px">${d.bad ? "⚠️" : "✅"}</div><h1 style="margin:6px 0">${esc(d.title)}</h1><p class="muted">${esc(d.sub)}</p>
     ${d.bad && d.packetKey ? `<button class="btn" id="retry">Retry email</button>` : ""}
-    ${d.link ? `<button class="btn secondary" id="dl">Download / share the packet</button>` : ""}</div>
+    ${d.link ? `<div class="row" style="margin-top:16px"><button class="btn secondary" id="view" style="margin:0">View packet</button><button class="btn secondary" id="dl" style="margin:0">Save / share</button></div>` : ""}</div>
     ${bad.length || missing.length ? `<div class="notice"><b>GoHighLevel needs a look:</b><ul>${bad.map((s) => `<li>${esc(s.step)}<br><span class="small muted">${esc(s.error)}</span></li>`).join("")}${missing.length ? `<li>Fields not found: ${esc(missing.join(", "))}</li>` : ""}</ul></div>` : `<p class="muted">Synced to GoHighLevel.</p>`}
     <button class="btn ${d.bad ? "secondary" : ""}" id="new">${d.bad ? "Back to the form" : "Start a new job"}</button>`;
   $("#new").onclick = () => form();
   if ($("#dl")) $("#dl").onclick = () => downloadPacket(d.link, `${d.subject || "Job packet"}.pdf`);
+  if ($("#view")) $("#view").onclick = async () => {
+    const b = $("#view"); b.disabled = true; b.innerHTML = '<span class="spinner"></span>';
+    try { const res = await fetch(d.link); if (!res.ok) throw new Error("Couldn't load the packet"); await viewPdf(await res.blob(), `${d.subject || "Job packet"}.pdf`, d.subject || "Job packet"); }
+    catch (e) { toast(e.message); }
+    b.disabled = false; b.textContent = "View packet";
+  };
   if ($("#retry")) $("#retry").onclick = async () => {
     const b = $("#retry"); b.disabled = true; b.innerHTML = '<span class="spinner"></span>';
     try {
@@ -377,6 +381,44 @@ function done(d) {
       done({ ...d, bad: false, title: "Deal submitted", sub: `${d.subject} was emailed to the HomePro team.` });
     } catch (e) { toast("Still failing: " + e.message, 6000); b.disabled = false; b.textContent = "Retry email"; }
   };
+}
+
+// ---------- in-app PDF viewer (PDF.js) ----------
+let pdfjsReady = null;
+function loadPdfJs() {
+  if (pdfjsReady) return pdfjsReady;
+  const BASE = "/vendor/"; // PDF.js 3.11.174 (legacy build), served from the app itself
+  pdfjsReady = new Promise((res, rej) => {
+    const sc = document.createElement("script"); sc.src = BASE + "pdf.min.js";
+    sc.onload = () => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = BASE + "pdf.worker.min.js"; res(window.pdfjsLib); };
+    sc.onerror = () => { pdfjsReady = null; rej(new Error("Couldn't load the PDF viewer (check your signal)")); };
+    document.head.appendChild(sc);
+  });
+  return pdfjsReady;
+}
+async function viewPdf(blob, fileName, title) {
+  const pdfjs = await loadPdfJs();
+  const file = new File([blob], safeName(fileName), { type: "application/pdf" });
+  const ov = document.createElement("div");
+  ov.className = "viewer";
+  ov.innerHTML = `<div class="vbar"><button class="vbtn" id="vclose">Close</button><b>${esc(title)}</b><button class="vbtn" id="vshare">Save / share</button></div><div class="vpages" id="vpages"><div class="empty"><span class="spinner"></span></div></div>`;
+  document.body.appendChild(ov); document.body.style.overflow = "hidden";
+  const close = () => { ov.remove(); document.body.style.overflow = ""; };
+  ov.querySelector("#vclose").onclick = close;
+  ov.querySelector("#vshare").onclick = () => sharePdf(file, fileName); // file is already loaded, so the share sheet opens on the first tap
+  try {
+    const doc = await pdfjs.getDocument({ data: new Uint8Array(await blob.arrayBuffer()) }).promise;
+    const host = ov.querySelector("#vpages"); host.innerHTML = "";
+    const w = Math.min(host.clientWidth - 16, 900), dpr = Math.min(devicePixelRatio || 1, 2.5);
+    for (let i = 1; i <= doc.numPages; i++) {
+      if (!ov.isConnected) return;
+      const page = await doc.getPage(i);
+      const vp = page.getViewport({ scale: (w / page.getViewport({ scale: 1 }).width) * dpr });
+      const c = document.createElement("canvas"); c.width = vp.width; c.height = vp.height; c.style.width = w + "px";
+      host.appendChild(c);
+      await page.render({ canvasContext: c.getContext("2d"), viewport: vp }).promise;
+    }
+  } catch (e) { ov.querySelector("#vpages").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
 
 let readyFile = null; // iPhone: if the share sheet needs a fresh tap, the file waits here
