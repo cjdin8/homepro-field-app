@@ -63,7 +63,7 @@ async function loadPhotos(list) {
 async function savePacket(req, d, pdf) {
   const key = `${safe(d.jobNumber)}/${Date.now()}-${safe(d.jobNumber)}-${safe(lastName(d))}.pdf`;
   await packets().set(key, pdf, { metadata: { name: `${d.jobNumber} ${lastName(d)}.pdf` } });
-  return `${new URL(req.url).origin}/api/file?k=${encodeURIComponent(key)}&s=${sign("file:" + key)}`;
+  return { key, link: `${new URL(req.url).origin}/api/file?k=${encodeURIComponent(key)}&s=${sign("file:" + key)}` };
 }
 
 /** Contact + opportunity in GHL. Never throws: returns a log of steps. */
@@ -133,7 +133,8 @@ async function handleDeal(req, b, previewOnly) {
   if (previewOnly) return new Response(pdf, { headers: { "Content-Type": "application/pdf", "Content-Disposition": `inline; filename="preview.pdf"` } });
 
   const subject = `${d.jobNumber}: ${lastName(d)}`;
-  const link = await savePacket(req, d, pdf).catch(() => null);
+  const saved = await savePacket(req, d, pdf).catch(() => null);
+  const link = saved?.link || null;
   let email = { ok: false };
   try {
     const r = await sendPacket({
@@ -144,7 +145,7 @@ async function handleDeal(req, b, previewOnly) {
   } catch (e) { email = { ok: false, error: String(e.message || e).slice(0, 300) }; }
   d._emailed = email.ok;
   const g = await syncGhl(d, "deal", { packetPdf: pdf, packetLink: link });
-  return json({ ok: true, email, link, ghl: g });
+  return json({ ok: true, email, link, packetKey: saved?.key || null, subject, oppId: g.oppId || null, ghl: g });
 }
 
 async function serveFile(url) {
@@ -153,7 +154,8 @@ async function serveFile(url) {
   if (s.length !== want.length || !timingSafeEqual(Buffer.from(s), Buffer.from(want))) return new Response("Not found", { status: 404 });
   const e = await packets().getWithMetadata(k, { type: "arrayBuffer" });
   if (!e) return new Response("Not found", { status: 404 });
-  return new Response(e.data, { headers: { "Content-Type": "application/pdf", "Content-Disposition": `inline; filename="${e.metadata?.name || "packet.pdf"}"` } });
+  const disp = url.searchParams.get("dl") === "1" ? "attachment" : "inline";
+  return new Response(e.data, { headers: { "Content-Type": "application/pdf", "Content-Disposition": `${disp}; filename="${e.metadata?.name || "packet.pdf"}"` } });
 }
 
 export default async (req) => {
@@ -191,6 +193,17 @@ export default async (req) => {
       return json({ ok: true, ghl: g });
     }
     if (path === "/deal" && req.method === "POST") return await handleDeal(req, body, false);
+    if (path === "/resend" && req.method === "POST") {
+      const key = String(body.packetKey || "");
+      const e = await packets().getWithMetadata(key, { type: "arrayBuffer" });
+      if (!e) return fail("Packet not found", 404);
+      const subject = String(body.subject || e.metadata?.name || "Job packet").replace(/\.pdf$/, "");
+      try {
+        await sendPacket({ subject, filename: e.metadata?.name || "packet.pdf", pdf: Buffer.from(e.data), text: `${subject}\n\nAttached: signed agreement, order sheet and staircase photos.\n\nCJ Dinsmore\nHomePro Mobility` });
+      } catch (err) { return json({ ok: false, error: String(err.message || err).slice(0, 300) }); }
+      if (body.oppId) await ghl.updateOpp(body.oppId, { fieldsByName: { "Packet Emailed": "Yes" } }).catch(() => {});
+      return json({ ok: true, subject, to: recipients() });
+    }
     if (path === "/preview" && req.method === "POST") return await handleDeal(req, body, true);
     return fail("Not found", 404);
   } catch (e) {

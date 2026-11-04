@@ -60,5 +60,10 @@ console.log("deal ok, packet", pdf.length, "bytes");
 // Preview
 const pv = await call("/preview", { deal, photos: [{ key: ph }] }, true);
 assert.equal(pv.headers.get("content-type"), "application/pdf");
+assert.ok(r.packetKey && r.subject === "MYR281SL: Buyer");
+const rs = await call("/resend", { packetKey: r.packetKey, subject: r.subject, oppId: r.oppId });
+assert.equal(rs.ok, true, JSON.stringify(rs));
+const dl = await fetch(base.replace("/api", "") + new URL(r.link).pathname + new URL(r.link).search + "&dl=1");
+assert.match(dl.headers.get("content-disposition"), /^attachment/);
 console.log("ALL E2E CHECKS PASSED");
 server.close(); process.exit(0);

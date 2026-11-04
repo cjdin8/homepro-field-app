@@ -336,9 +336,12 @@ function reviewDeal() {
   if (p.customer2) pads.owner2 = signaturePad($("#s2"));
   const body = () => ({ deal: { ...p, signatures: Object.fromEntries(Object.entries(pads).map(([k, v]) => [k, v.toDataURL()])) }, photos: D.photos.map((x, i) => ({ key: x.key, caption: `Staircase photo ${i + 1}` })), idPhoto: p.payType === "Finance" && D.idPhoto ? { key: D.idPhoto.key } : null });
   $("#prev").onclick = async () => {
-    const w = window.open("", "_blank");
-    try { const r = await api("/preview", body(), true); const blob = await r.blob(); const u = URL.createObjectURL(blob); if (w) w.location = u; else location.href = u; }
-    catch (e) { if (w) w.close(); toast(e.message); }
+    const pn = `PREVIEW ${subject}.pdf`;
+    if (readyFile && readyFile.name === safeName(pn)) { const f = readyFile; readyFile = null; return sharePdf(f, pn); }
+    const b = $("#prev"); b.disabled = true; b.innerHTML = '<span class="spinner"></span>';
+    try { const r = await api("/preview", body(), true); await sharePdf(await r.blob(), pn); }
+    catch (e) { toast(e.message); }
+    b.disabled = false; b.textContent = "Preview the packet PDF";
   };
   $("#go").onclick = async () => {
     if (pads.owner1.isEmpty()) return toast("Homeowner needs to sign");
@@ -349,7 +352,7 @@ function reviewDeal() {
     try {
       const r = await api("/deal", body());
       if (r.email.ok) store.del(DRAFT);
-      done({ title: r.email.ok ? "Deal submitted" : "Saved, but the email didn't send", sub: r.email.ok ? `${subject} was emailed to the HomePro team.` : `Email error: ${r.email.error}. Your form is still saved; fix the issue and submit again.`, link: r.link, ghl: r.ghl, bad: !r.email.ok });
+      done({ title: r.email.ok ? "Deal submitted" : "Saved, but the email didn't send", sub: r.email.ok ? `${subject} was emailed to the HomePro team.` : `Email error: ${r.email.error}`, link: r.link, ghl: r.ghl, bad: !r.email.ok, packetKey: r.packetKey, subject, oppId: r.oppId });
     } catch (e) { toast(e.message, 5000); $("#go").disabled = false; $("#go").textContent = "Submit deal"; }
   };
 }
@@ -359,10 +362,48 @@ function done(d) {
   const bad = (d.ghl?.log || []).filter((s) => !s.ok);
   const missing = d.ghl?.missing || [];
   app.innerHTML = `<div class="card" style="text-align:center;padding:26px 16px"><div style="font-size:40px">${d.bad ? "⚠️" : "✅"}</div><h1 style="margin:6px 0">${esc(d.title)}</h1><p class="muted">${esc(d.sub)}</p>
-    ${d.link ? `<a class="btn secondary" href="${esc(d.link)}" target="_blank" rel="noopener" style="text-decoration:none;line-height:52px">Open the job packet</a>` : ""}</div>
+    ${d.bad && d.packetKey ? `<button class="btn" id="retry">Retry email</button>` : ""}
+    ${d.link ? `<button class="btn secondary" id="dl">Download / share the packet</button>` : ""}</div>
     ${bad.length || missing.length ? `<div class="notice"><b>GoHighLevel needs a look:</b><ul>${bad.map((s) => `<li>${esc(s.step)}<br><span class="small muted">${esc(s.error)}</span></li>`).join("")}${missing.length ? `<li>Fields not found: ${esc(missing.join(", "))}</li>` : ""}</ul></div>` : `<p class="muted">Synced to GoHighLevel.</p>`}
-    <button class="btn" id="new">${d.bad ? "Back to the form" : "Start a new job"}</button>`;
+    <button class="btn ${d.bad ? "secondary" : ""}" id="new">${d.bad ? "Back to the form" : "Start a new job"}</button>`;
   $("#new").onclick = () => form();
+  if ($("#dl")) $("#dl").onclick = () => downloadPacket(d.link, `${d.subject || "Job packet"}.pdf`);
+  if ($("#retry")) $("#retry").onclick = async () => {
+    const b = $("#retry"); b.disabled = true; b.innerHTML = '<span class="spinner"></span>';
+    try {
+      const r = await api("/resend", { packetKey: d.packetKey, subject: d.subject, oppId: d.oppId });
+      if (!r.ok) throw new Error(r.error);
+      store.del(DRAFT);
+      done({ ...d, bad: false, title: "Deal submitted", sub: `${d.subject} was emailed to the HomePro team.` });
+    } catch (e) { toast("Still failing: " + e.message, 6000); b.disabled = false; b.textContent = "Retry email"; }
+  };
+}
+
+let readyFile = null; // iPhone: if the share sheet needs a fresh tap, the file waits here
+async function downloadPacket(link, name) {
+  if (readyFile && readyFile.name === safeName(name)) { const f = readyFile; readyFile = null; return sharePdf(f, name); }
+  try {
+    toast("Getting the PDF…", 1500);
+    const res = await fetch(link + "&dl=1");
+    if (!res.ok) throw new Error("Couldn't load the packet");
+    await sharePdf(await res.blob(), name);
+  } catch (e) { toast(e.message); }
+}
+const safeName = (n) => n.replace(/[\\/:*?"<>|]/g, "-");
+async function sharePdf(blob, name) {
+  {
+    const file = blob instanceof File ? blob : new File([blob], safeName(name), { type: "application/pdf" });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: name }); return; }
+      catch (e) {
+        if (e.name === "AbortError") return;
+        if (e.name === "NotAllowedError") { readyFile = file; toast("PDF is ready. Tap the button again to save or share it.", 5000); return; }
+      }
+    }
+    const u = URL.createObjectURL(file);
+    const a = document.createElement("a"); a.href = u; a.download = file.name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(u), 10000);
+  }
 }
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
