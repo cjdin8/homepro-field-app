@@ -65,5 +65,9 @@ const rs = await call("/resend", { packetKey: r.packetKey, subject: r.subject, o
 assert.equal(rs.ok, true, JSON.stringify(rs));
 const dl = await fetch(base.replace("/api", "") + new URL(r.link).pathname + new URL(r.link).search + "&dl=1");
 assert.match(dl.headers.get("content-disposition"), /^attachment/);
+const att = r.ghl.log.find((x) => x.step === "Attach job packet");
+assert.equal(att.ok, true);
+const dbg = await call("/debug/opp?id=" + r.oppId);
+assert.ok(dbg.customFields.find((x) => x.id === dbg.jobPacketFieldId)?.fieldValue, "packet stored in Job Packet field");
 console.log("ALL E2E CHECKS PASSED");
 server.close(); process.exit(0);

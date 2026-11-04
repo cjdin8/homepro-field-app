@@ -103,8 +103,12 @@ async function syncGhl(d, mode, { packetPdf, packetLink } = {}) {
     });
     oppId = r?.id; missing = r?.missing || [];
     if (oppId && packetPdf) {
-      const a = await step("Attach job packet", async () => { const x = await ghl.attachFile(oppId, "Job Packet", `${safe(d.jobNumber)}-${safe(lastName(d))}.pdf`, packetPdf, "application/pdf"); if (!x.attached) throw new Error(x.error); return x; });
-      void a;
+      await step("Attach job packet", async () => {
+        const x = await ghl.attachFile(oppId, "Job Packet", `${safe(d.jobNumber)}-${safe(lastName(d))}.pdf`, packetPdf, "application/pdf");
+        if (!x.attached) throw new Error(`${x.error}${x.stored ? " | GHL now holds: " + JSON.stringify(x.stored).slice(0, 300) : ""}`);
+        console.log("job packet attached using format:", x.format);
+        return x;
+      });
     }
   }
   await step("Tag contact", () => ghl.addTags(contactId, ["stairlift-sold"]));
@@ -193,6 +197,17 @@ export default async (req) => {
       return json({ ok: true, ghl: g });
     }
     if (path === "/deal" && req.method === "POST") return await handleDeal(req, body, false);
+    if (path === "/debug/opp") {
+      const id = url.searchParams.get("id") || "";
+      const o = await ghl.getOpp(id);
+      return json({ id: o.id, name: o.name, pipelineId: o.pipelineId, stageId: o.pipelineStageId, jobPacketFieldId: await ghl.fieldId("Job Packet"), customFields: o.customFields });
+    }
+    if (path === "/attach" && req.method === "POST") {
+      // Re-attach a saved packet to an opportunity (for jobs submitted before attachment worked)
+      const e = await packets().getWithMetadata(String(body.packetKey || ""), { type: "arrayBuffer" });
+      if (!e) return fail("Packet not found", 404);
+      return json(await ghl.attachFile(String(body.oppId || ""), "Job Packet", e.metadata?.name || "packet.pdf", Buffer.from(e.data), "application/pdf"));
+    }
     if (path === "/resend" && req.method === "POST") {
       const key = String(body.packetKey || "");
       const e = await packets().getWithMetadata(key, { type: "arrayBuffer" });

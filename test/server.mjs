@@ -22,6 +22,7 @@ globalThis.fetch = async (url, init = {}) => {
   calls.push({ method: init.method || "GET", path: u.pathname, query: Object.fromEntries(u.searchParams), body });
   const ok = (d) => new Response(JSON.stringify(d), { status: 200 });
   const p = u.pathname;
+  let m;
   if (p.endsWith("/customFields") && (init.method || "GET") === "GET") return ok({ customFields: FIELDS });
   if (p === "/opportunities/pipelines") return ok({ pipelines: PIPES });
   if (p === "/contacts/search") return ok({ contacts: [{ id: "c9", firstName: "Dashannon", lastName: "Livingston", phone: "+14105640000", city: "Timmonsville", state: "SC", postalCode: "29161", address1: "3841 Panther Path" }] });
@@ -31,7 +32,6 @@ globalThis.fetch = async (url, init = {}) => {
     if (body.customFields?.some((c) => "field_value" in c)) return new Response(JSON.stringify({ message: "field_value should not exist" }), { status: 422 });
     const id = "o" + (Object.keys(opps).length + 1); opps[id] = { id, ...body }; return ok({ opportunity: opps[id] });
   }
-  let m;
   if ((m = p.match(/^\/opportunities\/(\w+)$/)) && init.method === "PUT") {
     if (body.customFields?.some((c) => "field_value" in c)) return new Response(JSON.stringify({ message: "field_value should not exist" }), { status: 422 });
     const o = opps[m[1]] || (opps[m[1]] = { id: m[1], customFields: [] });
@@ -39,6 +39,7 @@ globalThis.fetch = async (url, init = {}) => {
     for (const c of customFields) { const ex = (o.customFields ||= []).find((x) => x.id === c.id); if (ex) ex.fieldValue = c.fieldValue; else o.customFields.push(c); }
     return ok({ opportunity: o });
   }
+  if ((m = p.match(/^\/opportunities\/(\w+)$/)) && (init.method || "GET") === "GET") return ok({ opportunity: opps[m[1]] || {} });
   if (p.endsWith("/customFields/upload")) return ok({ uploadedFiles: { "x.pdf": "https://storage.example/x.pdf" } });
   if (/\/contacts\/\w+\/(notes|tags)$/.test(p)) return ok({});
   return new Response("not mocked " + p, { status: 404 });
