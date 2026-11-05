@@ -6,6 +6,8 @@ import { sendPacket, recipients } from "../../lib/mail.mjs";
 import { checkPin, issueToken, validToken, sign } from "../../lib/auth.mjs";
 import { buildPacket, validate, balance, lastName, fullName, liftSummary, hasFoldingRail, PRODUCTS, VPLS, VPL_FEATURES, EXTRAS, GRAB_BARS } from "../../lib/docs.mjs";
 
+// Exact wording the customer agrees to in person (shown in the app, recorded in GHL, and shown on cjdinsmore.com/sms-consent).
+export const SMS_CONSENT_TEXT = "I agree to receive text messages from CJ Dinsmore about my stairlift quote, appointments, installation, and related offers. Msg frequency varies. Msg & data rates may apply. Reply STOP to opt out, HELP for help. Consent is not a condition of purchase.";
 const json = (d, status = 200) => Response.json(d, { status });
 const fail = (msg, status = 400) => json({ error: msg }, status);
 const todayET = () => new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
@@ -72,6 +74,13 @@ async function syncGhl(d, mode, { packetPdf, packetLink } = {}) {
   const step = async (name, fn) => { try { const r = await fn(); log.push({ step: name, ok: true }); return r; } catch (e) { log.push({ step: name, ok: false, error: String(e.message || e).slice(0, 400) }); return null; } };
   const contactId = await step("Save customer contact", () => ghl.upsertContact(d.customer));
   if (!contactId) return { log };
+  if (d.smsConsent) {
+    const when = new Date(d.smsConsentAt || Date.now()).toLocaleString("en-US", { timeZone: "America/New_York", dateStyle: "medium", timeStyle: "short" }) + " ET";
+    await step("Record SMS consent", async () => {
+      await ghl.addTags(contactId, ["sms-consent"]);
+      await ghl.addNote(contactId, `SMS CONSENT (in person, HomePro field app)\nCustomer: ${fullName(d)}\nMobile: ${d.customer.phone || "(none entered)"}\nChecked by customer: ${when}\nRep: CJ Dinsmore\nWording agreed to: "${SMS_CONSENT_TEXT}"`);
+    });
+  }
   const sales = await step("Find Sales Pipeline", () => ghl.stage(["Sales Pipeline"], mode === "deal" ? ["Sold"] : ["Quoted - Following Up", "Quoted", "Contacted"]));
   let oppId = null, missing = [];
   if (mode === "lead") {
@@ -180,6 +189,7 @@ export default async (req) => {
       vpls: VPLS, vplFeatures: Object.fromEntries(Object.entries(VPL_FEATURES).map(([k, v]) => [k, { label: v.label, qty: !!v.qty }])),
       extras: Object.fromEntries(Object.entries(EXTRAS).map(([k, v]) => [k, { label: v.label, qty: !!v.qty }])),
       grabBars: Object.keys(GRAB_BARS).map(Number),
+      smsConsentText: SMS_CONSENT_TEXT,
     });
     if (path === "/contacts") { const q = (url.searchParams.get("q") || "").trim(); return json({ contacts: q.length < 2 ? [] : await ghl.searchContacts(q) }); }
     if (path === "/photo" && req.method === "POST") {

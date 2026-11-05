@@ -15,6 +15,7 @@ token = (await call("/login", { pin: "123456" })).token;
 assert.ok(token);
 const cfg = await call("/config");
 assert.equal(cfg.recipients.length, 4);
+assert.match(cfg.smsConsentText, /Reply STOP/);
 assert.equal((await call("/contacts?q=liv")).contacts[0].lastName, "Livingston");
 
 const sig = "data:image/png;base64," + fs.readFileSync("test/sig.png").toString("base64");
@@ -25,10 +26,12 @@ assert.ok(ph && idk);
 
 // Lead
 calls.length = 0;
-const lead = await call("/lead", { deal: { customer: { first: "Bob", last: "Buyer", phone: "8435550111", address: "", city: "", state: "SC", zip: "" }, lifts: [], extras: {}, leadNotes: "Wants to talk to his son first", price: 4999 } });
+const lead = await call("/lead", { deal: { customer: { first: "Bob", last: "Buyer", phone: "8435550111", address: "", city: "", state: "SC", zip: "" }, lifts: [], extras: {}, leadNotes: "Wants to talk to his son first", price: 4999, smsConsent: true, smsConsentAt: "2026-11-05T19:00:00Z" } });
 assert.equal(lead.ok, true, JSON.stringify(lead));
 assert.ok(lead.ghl.log.every((s) => s.ok), JSON.stringify(lead.ghl.log));
 assert.equal(opps.o1.pipelineStageId, "s3", "lead lands in Quoted - Following Up");
+assert.ok(calls.some((c) => c.path.endsWith("/tags") && c.body.tags.includes("sms-consent")), "sms-consent tag");
+assert.ok(calls.some((c) => c.path.endsWith("/notes") && /SMS CONSENT[\s\S]*Nov 5, 2026[\s\S]*CJ Dinsmore about my stairlift/.test(c.body.body)), "consent note");
 console.log("lead ok");
 
 // Deal (financed, with ID)

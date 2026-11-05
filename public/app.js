@@ -80,12 +80,22 @@ function newDraft() {
   return {
     jobNumber: "", date: CFG.today, installDate: "TBD", customer: { first: "", last: "", address: "", city: "", state: "SC", zip: "", phone: "", alt: "", email: "" },
     customer2: null, contactId: null, heightWeight: "", lifts: [], vpl: "", vplFeatures: {}, extras: {}, grabBars: [],
-    stopOnLastStep: false, additionalItems: "", notes: "", leadNotes: "", price: "", deposit: "", payType: "Cash",
+    stopOnLastStep: false, additionalItems: "", notes: "", leadNotes: "", smsConsent: false, smsConsentAt: null, price: "", deposit: "", payType: "Cash",
     photos: [], idPhoto: null,
   };
 }
 let D = null;
 const save = () => store.set(DRAFT, D);
+
+// ---------- SMS consent (customer checks this themselves) ----------
+function consentHTML() {
+  return `<div class="card consent"><label class="check" style="align-items:flex-start"><input type="checkbox" class="smsc" ${D.smsConsent ? "checked" : ""} style="margin-top:2px">
+    <span><b>OK to text me</b> <span class="opt">(optional)</span><br><span class="small">${esc(CFG.smsConsentText)}</span>
+    <span class="small muted" style="display:block;margin-top:4px">Mobile: ${esc(D.customer.phone || "enter a phone number above")}</span></span></label></div>`;
+}
+function wireConsent() {
+  document.querySelectorAll(".smsc").forEach((el) => el.onchange = (e) => { D.smsConsent = e.target.checked; D.smsConsentAt = e.target.checked ? new Date().toISOString() : null; save(); });
+}
 
 // ---------- main form ----------
 async function form() {
@@ -162,6 +172,7 @@ function render() {
     <div id="idWrap" ${D.payType === "Finance" ? "" : "hidden"}><label>Customer ID <span class="opt">(financing, optional)</span></label>
       <label class="btn secondary" style="display:flex;align-items:center;justify-content:center;margin-top:4px">🪪 ${D.idPhoto ? "Replace ID photo" : "Add ID photo"}<input type="file" id="idph" accept="image/*" hidden></label><div class="thumbs" id="idthumb"></div></div>
   </div>
+  <h2>Text messages</h2>${consentHTML()}
   <h2>Lead notes <span class="opt" style="text-transform:none;letter-spacing:0">(only used when saving as a lead)</span></h2>
   <div class="card"><textarea id="leadNotes" placeholder="Where they are in the decision, objections, follow-up timing">${esc(D.leadNotes)}</textarea></div>
   <button class="linkbtn danger" id="clear">Start over (clear this form)</button>
@@ -226,6 +237,7 @@ function render() {
   $("#addl").oninput = (e) => { D.additionalItems = e.target.value; save(); };
   $("#notes").oninput = (e) => { D.notes = e.target.value; save(); };
   $("#leadNotes").oninput = (e) => { D.leadNotes = e.target.value; save(); };
+  wireConsent();
   $("#job").oninput = (e) => { D.jobNumber = e.target.value.toUpperCase().trim(); save(); };
   $("#inst").oninput = (e) => { D.installDate = e.target.value; save(); };
   const bal = () => { $("#bal").textContent = usd(num(D.price) - num(D.deposit)); };
@@ -327,14 +339,16 @@ function reviewDeal() {
     </table>
     <button class="btn secondary" id="prev">Preview the packet</button>
   </div>
+  <h2>Text messages</h2>${consentHTML()}
   <h2>Homeowner · ${esc(p.customer.first)} ${esc(p.customer.last)}</h2>${sigHTML("s1")}
   ${p.customer2 ? `<h2>Homeowner · ${esc(p.customer2.first)} ${esc(p.customer2.last)}</h2>${sigHTML("s2")}` : ""}
   <h2>HomePro representative · CJ Dinsmore</h2>${sigHTML("sr")}
   <div class="notice" style="border-left-color:var(--navy);background:#eef4fb">Emails <b>${esc(subject)}</b> to ${esc(CFG.recipients.map((r) => r.replace(/<.*>/, "").trim() || r).join(", "))}, and files it in the Deal Pipeline.</div>
   <button class="btn" id="go">Submit deal</button>`;
+  wireConsent();
   const pads = { owner1: signaturePad($("#s1")), rep: signaturePad($("#sr")) };
   if (p.customer2) pads.owner2 = signaturePad($("#s2"));
-  const body = () => ({ deal: { ...p, signatures: Object.fromEntries(Object.entries(pads).map(([k, v]) => [k, v.toDataURL()])) }, photos: D.photos.map((x, i) => ({ key: x.key, caption: `Staircase photo ${i + 1}` })), idPhoto: p.payType === "Finance" && D.idPhoto ? { key: D.idPhoto.key } : null });
+  const body = () => ({ deal: { ...p, smsConsent: D.smsConsent, smsConsentAt: D.smsConsentAt, signatures: Object.fromEntries(Object.entries(pads).map(([k, v]) => [k, v.toDataURL()])) }, photos: D.photos.map((x, i) => ({ key: x.key, caption: `Staircase photo ${i + 1}` })), idPhoto: p.payType === "Finance" && D.idPhoto ? { key: D.idPhoto.key } : null });
   $("#prev").onclick = async () => {
     const b = $("#prev"); b.disabled = true; b.innerHTML = '<span class="spinner"></span>';
     try { const r = await api("/preview", body(), true); await viewPdf(await r.blob(), `PREVIEW ${subject}.pdf`, "Preview (not sent yet)"); }
