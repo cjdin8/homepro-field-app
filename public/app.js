@@ -308,16 +308,52 @@ function clientErrors(p) {
   return e;
 }
 
+// ---------- follow-up day (asked every time a lead is saved) ----------
+const dayPlus = (n) => { const d = new Date(CFG.today + "T12:00:00"); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+const dayLabel = (day) => new Date(day + "T12:00:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+function askFollowUp(name) {
+  return new Promise((resolve) => {
+    const ov = document.createElement("div");
+    ov.className = "sheet";
+    let day = dayPlus(3);
+    ov.innerHTML = `<div class="sheetcard" role="dialog" aria-modal="true" aria-labelledby="fuh"><h1 id="fuh">When will you follow up with ${esc(name)}?</h1>
+      <p class="muted small">This sets a GoHighLevel task for 9 AM that day and gives your follow-up workflow its date.</p>
+      <div class="seg" id="fuq">${CFG.followUpChoices.map((c) => `<button type="button" data-v="${dayPlus(c.days)}">${esc(c.label)}</button>`).join("")}</div>
+      <label for="fud">Or pick a day</label><input type="date" id="fud" min="${CFG.today}" value="${day}">
+      <p class="small" id="ful" style="font-weight:600"></p>
+      <button class="btn" id="fuok">Save lead</button><button class="btn secondary" id="funo" style="margin-top:8px">Cancel</button></div>`;
+    document.body.appendChild(ov);
+    const paint = () => {
+      $("#ful", ov).textContent = day ? "Follow up on " + dayLabel(day) : "";
+      $$("#fuq button", ov).forEach((b) => b.classList.toggle("on", b.dataset.v === day));
+      $("#fud", ov).value = day;
+    };
+    $$("#fuq button", ov).forEach((b) => (b.onclick = () => { day = b.dataset.v; paint(); }));
+    $("#fud", ov).onchange = (e) => { day = e.target.value; paint(); };
+    const close = (v) => { ov.remove(); resolve(v); };
+    $("#funo", ov).onclick = () => close(null);
+    $("#fuok", ov).onclick = () => { if (!day || day < CFG.today) return toast("Pick today or a later day"); close(day); };
+    paint();
+  });
+}
+
 async function saveLead() {
   const p = payload();
   if (!p.customer.first || !p.customer.last) return toast("Enter the customer's first and last name");
   if (!p.customer.phone && !p.customer.email) return toast("Enter a phone number or email");
-  if (!confirm(`Save ${p.customer.first} ${p.customer.last} as a lead in the follow-up pipeline?`)) return;
+  const followUpDate = await askFollowUp(p.customer.first);
+  if (!followUpDate) return;
   const b = $("#asLead"); b.disabled = true; b.innerHTML = '<span class="spinner"></span>';
   try {
-    const r = await api("/lead", { deal: p });
+    const r = await api("/lead", { deal: { ...p, followUpDate }, photos: D.photos.map((x, i) => ({ key: x.key, caption: `Staircase photo ${i + 1}` })) });
     store.del(DRAFT);
-    done({ title: "Lead saved", sub: `${p.customer.first} ${p.customer.last} is in ${r.ghl.stage ? `"${r.ghl.stage}"` : "the Sales Pipeline"}. Follow-up starts from GoHighLevel.`, ghl: r.ghl });
+    const name = `${p.customer.first} ${p.customer.last}`;
+    done({
+      title: "Lead saved",
+      sub: `${name} is in ${r.ghl.stage ? `"${r.ghl.stage}"` : "the Sales Pipeline"}. Follow-up is set for ${r.followUp?.label || dayLabel(followUpDate)}.`,
+      extra: r.link ? "The unsigned quote copy is saved with the lead." : r.quoteError ? `The quote copy couldn't be built: ${r.quoteError}` : "No quote copy was saved because no product was filled in.",
+      link: r.link, subject: `Quote copy ${p.customer.last}`, ghl: r.ghl,
+    });
   } catch (e) { toast(e.message, 4000); b.disabled = false; b.textContent = "Save as lead"; }
 }
 
@@ -364,7 +400,13 @@ function reviewDeal() {
     try {
       const r = await api("/deal", body());
       if (r.email.ok) store.del(DRAFT);
-      done({ title: r.email.ok ? "Deal submitted" : "Saved, but the email didn't send", sub: r.email.ok ? `${subject} was emailed to the HomePro team.` : `Email error: ${r.email.error}`, link: r.link, ghl: r.ghl, bad: !r.email.ok, packetKey: r.packetKey, subject, oppId: r.oppId });
+      const cc = r.customerCopy || {};
+      done({
+        title: r.email.ok ? "Deal submitted" : "Saved, but the email didn't send", sub: r.email.ok ? `${subject} was emailed to the HomePro team.` : `Email error: ${r.email.error}`,
+        extra: cc.ok ? `A copy of the signed agreement was emailed to ${cc.to}.` : cc.error ? `The customer's copy didn't send (${cc.error}).` : "No copy was emailed to the customer because there is no email address on the form.",
+        link: r.link, ghl: r.ghl, bad: !r.email.ok, packetKey: r.packetKey, subject, oppId: r.oppId,
+        customerCopyKey: cc.ok ? null : r.customerCopyKey, customerEmail: cc.ok ? null : p.customer.email,
+      });
     } catch (e) { toast(e.message, 5000); $("#go").disabled = false; $("#go").textContent = "Submit deal"; }
   };
 }
@@ -373,7 +415,7 @@ function done(d) {
   $("#back").hidden = true; window.scrollTo(0, 0);
   const bad = (d.ghl?.log || []).filter((s) => !s.ok);
   const missing = d.ghl?.missing || [];
-  app.innerHTML = `<div class="card" style="text-align:center;padding:26px 16px"><div style="font-size:40px">${d.bad ? "⚠️" : "✅"}</div><h1 style="margin:6px 0">${esc(d.title)}</h1><p class="muted">${esc(d.sub)}</p>
+  app.innerHTML = `<div class="card" style="text-align:center;padding:26px 16px"><div style="font-size:40px">${d.bad ? "⚠️" : "✅"}</div><h1 style="margin:6px 0">${esc(d.title)}</h1><p class="muted">${esc(d.sub)}</p>${d.extra ? `<p class="muted small">${esc(d.extra)}</p>` : ""}
     ${d.bad && d.packetKey ? `<button class="btn" id="retry">Retry email</button>` : ""}
     ${d.link ? `<div class="row" style="margin-top:16px"><button class="btn secondary" id="view" style="margin:0">View packet</button><button class="btn secondary" id="dl" style="margin:0">Save / share</button></div>` : ""}</div>
     ${bad.length || missing.length ? `<div class="notice"><b>GoHighLevel needs a look:</b><ul>${bad.map((s) => `<li>${esc(s.step)}<br><span class="small muted">${esc(s.error)}</span></li>`).join("")}${missing.length ? `<li>Fields not found: ${esc(missing.join(", "))}</li>` : ""}</ul></div>` : `<p class="muted">Synced to GoHighLevel.</p>`}
@@ -389,10 +431,11 @@ function done(d) {
   if ($("#retry")) $("#retry").onclick = async () => {
     const b = $("#retry"); b.disabled = true; b.innerHTML = '<span class="spinner"></span>';
     try {
-      const r = await api("/resend", { packetKey: d.packetKey, subject: d.subject, oppId: d.oppId });
+      const r = await api("/resend", { packetKey: d.packetKey, subject: d.subject, oppId: d.oppId, customerCopyKey: d.customerCopyKey, customerEmail: d.customerEmail });
       if (!r.ok) throw new Error(r.error);
       store.del(DRAFT);
-      done({ ...d, bad: false, title: "Deal submitted", sub: `${d.subject} was emailed to the HomePro team.` });
+      const cc = r.customerCopy;
+      done({ ...d, bad: false, title: "Deal submitted", sub: `${d.subject} was emailed to the HomePro team.`, extra: cc ? (cc.ok ? `A copy of the signed agreement was emailed to ${cc.to}.` : `The customer's copy didn't send (${cc.error}).`) : d.extra });
     } catch (e) { toast("Still failing: " + e.message, 6000); b.disabled = false; b.textContent = "Retry email"; }
   };
 }
