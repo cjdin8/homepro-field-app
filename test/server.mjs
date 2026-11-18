@@ -13,6 +13,9 @@ const PIPES = [
   { id: "deal", name: "Deal Pipeline", stages: [{ id: "d1", name: "Sold – Packet Sent" }, { id: "d2", name: "Install Scheduled" }] },
 ];
 export const opps = {};
+export const contacts = {};
+export const tasks = [];
+const CONTACT_FIELDS = [];
 globalThis.fetch = async (url, init = {}) => {
   const u = new URL(url);
   if (u.hostname !== "services.leadconnectorhq.com") return realFetch(url, init);
@@ -23,7 +26,26 @@ globalThis.fetch = async (url, init = {}) => {
   const ok = (d) => new Response(JSON.stringify(d), { status: 200 });
   const p = u.pathname;
   let m;
-  if (p.endsWith("/customFields") && (init.method || "GET") === "GET") return ok({ customFields: FIELDS });
+  if (p.endsWith("/customFields") && (init.method || "GET") === "GET") return ok({ customFields: u.searchParams.get("model") === "contact" ? CONTACT_FIELDS : FIELDS });
+  if (p.endsWith("/customFields") && init.method === "POST") {
+    const list = body.model === "contact" ? CONTACT_FIELDS : FIELDS;
+    const f = { id: (body.model === "contact" ? "cf" : "f") + list.length, name: body.name, dataType: body.dataType };
+    list.push(f); return ok({ customField: f });
+  }
+  if (p === "/forms/upload-custom-files") {
+    const key = Object.keys(body)[0];
+    const c = (contacts[u.searchParams.get("contactId")] ||= { id: u.searchParams.get("contactId"), customFields: [] });
+    c.customFields.push({ id: key.split("_")[0], value: { [key.split("_")[1]]: { url: "https://storage.example/q.pdf" } } });
+    return ok({});
+  }
+  if ((m = p.match(/^\/contacts\/(\w+)\/tasks$/)) && init.method === "POST") { tasks.push({ contactId: m[1], ...body }); return ok({ task: { id: "t" + tasks.length } }); }
+  if ((m = p.match(/^\/contacts\/(\w+)$/)) && init.method === "PUT") {
+    if (body.customFields?.some((c) => !("field_value" in c))) return new Response(JSON.stringify({ message: "field_value is required" }), { status: 422 });
+    const c = (contacts[m[1]] ||= { id: m[1], customFields: [] });
+    for (const f of body.customFields || []) { const ex = c.customFields.find((x) => x.id === f.id); if (ex) ex.value = f.field_value; else c.customFields.push({ id: f.id, value: f.field_value }); }
+    return ok({ contact: c });
+  }
+  if ((m = p.match(/^\/contacts\/(\w+)$/)) && (init.method || "GET") === "GET" && m[1] !== "search" && m[1] !== "upsert") return ok({ contact: contacts[m[1]] || { id: m[1], customFields: [] } });
   if (p === "/opportunities/pipelines") return ok({ pipelines: PIPES });
   if (p === "/contacts/search") return ok({ contacts: [{ id: "c9", firstName: "Dashannon", lastName: "Livingston", phone: "+14105640000", city: "Timmonsville", state: "SC", postalCode: "29161", address1: "3841 Panther Path" }] });
   if (p === "/contacts/upsert") return ok({ contact: { id: "c1" } });

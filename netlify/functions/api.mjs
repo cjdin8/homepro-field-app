@@ -2,9 +2,9 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { getStore } from "../../lib/blobs.mjs";
 import * as ghl from "../../lib/ghl.mjs";
-import { sendPacket, recipients } from "../../lib/mail.mjs";
+import { sendPacket, sendCustomerCopy, recipients } from "../../lib/mail.mjs";
 import { checkPin, issueToken, validToken, sign } from "../../lib/auth.mjs";
-import { buildPacket, validate, balance, lastName, fullName, liftSummary, hasFoldingRail, PRODUCTS, VPLS, VPL_FEATURES, EXTRAS, GRAB_BARS } from "../../lib/docs.mjs";
+import { buildPacket, buildQuotePacket, buildCustomerCopy, hasQuoteContent, validate, balance, lastName, fullName, liftSummary, hasFoldingRail, PRODUCTS, VPLS, VPL_FEATURES, EXTRAS, GRAB_BARS } from "../../lib/docs.mjs";
 
 // Exact wording the customer agrees to in person (shown in the app, recorded in GHL, and shown on cjdinsmore.com/sms-consent).
 export const SMS_CONSENT_TEXT = "I agree to receive text messages from CJ Dinsmore about my stairlift quote, appointments, installation, and related offers. Msg frequency varies. Msg & data rates may apply. Reply STOP to opt out, HELP for help. Consent is not a condition of purchase.";
@@ -14,6 +14,18 @@ const todayET = () => new Date().toLocaleDateString("en-CA", { timeZone: "Americ
 const photos = () => getStore({ name: "photos", consistency: "strong" });
 const packets = () => getStore({ name: "packets", consistency: "strong" });
 const safe = (s) => String(s || "").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").slice(0, 40);
+const env = (k) => (globalThis.Netlify ? Netlify.env.get(k) : process.env[k]);
+const money = (n) => Number(n || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
+const isDay = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ""));
+/** ISO timestamp for `hour`:00 Eastern on a YYYY-MM-DD day (handles daylight saving). */
+export function etIso(day, hour = 9) {
+  const [y, m, d] = day.split("-").map(Number);
+  let t = Date.UTC(y, m - 1, d, hour + 5);
+  const h = Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", hourCycle: "h23" }).format(new Date(t)));
+  t -= (h - hour) * 3600e3;
+  return new Date(t).toISOString();
+}
+const prettyDay = (day) => new Date(day + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" });
 
 const GHL_PRODUCT = {
   is350: "Harmar Indigo IS350", sl600hd: "Harmar SL600HD", hc1000out: "Handicare 1000 Outdoor", helix: "Harmar Helix Curved",
@@ -62,14 +74,15 @@ async function loadPhotos(list) {
   return out;
 }
 
-async function savePacket(req, d, pdf) {
-  const key = `${safe(d.jobNumber)}/${Date.now()}-${safe(d.jobNumber)}-${safe(lastName(d))}.pdf`;
-  await packets().set(key, pdf, { metadata: { name: `${d.jobNumber} ${lastName(d)}.pdf` } });
+async function saveFile(req, key, name, pdf) {
+  await packets().set(key, pdf, { metadata: { name } });
   return { key, link: `${new URL(req.url).origin}/api/file?k=${encodeURIComponent(key)}&s=${sign("file:" + key)}` };
 }
+const savePacket = (req, d, pdf) => saveFile(req, `${safe(d.jobNumber)}/${Date.now()}-${safe(d.jobNumber)}-${safe(lastName(d))}.pdf`, `${d.jobNumber} ${lastName(d)}.pdf`, pdf);
+const saveQuote = (req, d, pdf) => saveFile(req, `quotes/${Date.now()}-${safe(lastName(d))}.pdf`, `Quote copy ${lastName(d)}.pdf`, pdf);
 
 /** Contact + opportunity in GHL. Never throws: returns a log of steps. */
-async function syncGhl(d, mode, { packetPdf, packetLink } = {}) {
+async function syncGhl(d, mode, { packetPdf, packetLink, quotePdf, quoteLink } = {}) {
   const log = [];
   const step = async (name, fn) => { try { const r = await fn(); log.push({ step: name, ok: true }); return r; } catch (e) { log.push({ step: name, ok: false, error: String(e.message || e).slice(0, 400) }); return null; } };
   const contactId = await step("Save customer contact", () => ghl.upsertContact(d.customer));
@@ -84,16 +97,51 @@ async function syncGhl(d, mode, { packetPdf, packetLink } = {}) {
   const sales = await step("Find Sales Pipeline", () => ghl.stage(["Sales Pipeline"], mode === "deal" ? ["Sold"] : ["Quoted - Following Up", "Quoted", "Contacted"]));
   let oppId = null, missing = [];
   if (mode === "lead") {
+    const what = productsFor(d).join(", ") || "Stairlift";
+    if (d.followUpDate) await ghl.ensureField("Follow-Up Date", "DATE", "opportunity");
     const r = await step("Save lead opportunity", async () => {
       const existing = sales && await ghl.findOpenOpp(contactId, sales.pipelineId);
-      const f = { ...dealFields(d), "Lead Notes": d.leadNotes || d.notes || undefined };
+      const f = { ...dealFields(d), "Lead Notes": d.leadNotes || d.notes || undefined, "Follow-Up Date": d.followUpDate || undefined };
       return existing
         ? ghl.updateOpp(existing.id, { pipelineId: sales.pipelineId, stageId: sales.stageId, value: Number(d.price) || undefined, fieldsByName: f })
         : ghl.createOpp({ contactId, pipelineId: sales.pipelineId, stageId: sales.stageId, name: oppName(d), value: Number(d.price) || 0, fieldsByName: f });
     });
     oppId = r?.id; missing = r?.missing || [];
-    await step("Tag contact", () => ghl.addTags(contactId, ["stairlift-lead"]));
-    if (d.leadNotes || d.notes) await step("Add note", () => ghl.addNote(contactId, `Lead (in-home quote${d.price ? ` ${Number(d.price).toLocaleString("en-US", { style: "currency", currency: "USD" })}` : ""}): ${d.leadNotes || d.notes}`));
+    await step("Tag contact", () => ghl.addTags(contactId, d.followUpDate ? ["stairlift-lead", "follow-up-scheduled"] : ["stairlift-lead"]));
+    if (d.followUpDate) {
+      // The contact fields are what a GHL workflow reads on the follow-up day (see docs/follow-up-workflow.md).
+      await step("Set follow-up date on the contact", async () => {
+        await ghl.ensureField("Follow-Up Date", "DATE", "contact");
+        await ghl.ensureField("Follow-Up Product", "TEXT", "contact");
+        await ghl.ensureField("Follow-Up Notes", "LARGE_TEXT", "contact");
+        const x = await ghl.updateContactFields(contactId, { "Follow-Up Date": d.followUpDate, "Follow-Up Product": what, "Follow-Up Notes": [d.price ? `Quoted ${money(d.price)}` : "", d.leadNotes || d.notes || ""].filter(Boolean).join(". ") || undefined });
+        if (x.missing.length) throw new Error(`Add these CONTACT fields in GoHighLevel: ${x.missing.join(", ")}`);
+      });
+      await step("Create follow-up task", () => ghl.createTask(contactId, {
+        title: `Follow up: ${fullName(d.customer)} - ${what}`,
+        body: [`In-home quote on ${d.date}${d.price ? ` for ${money(d.price)}` : ""}.`, d.leadNotes || d.notes || "", d.customer.phone ? `Phone: ${d.customer.phone}` : "", quoteLink ? `Quote copy: ${quoteLink}` : ""].filter(Boolean).join("\n"),
+        dueDate: etIso(d.followUpDate, 9),
+      }));
+    }
+    if (quotePdf) {
+      const name = `Quote-copy-${safe(lastName(d))}.pdf`;
+      if (oppId) await step("Attach unsigned quote to the opportunity", async () => {
+        await ghl.ensureField("Quote Packet", "FILE_UPLOAD", "opportunity");
+        const x = await ghl.attachFile(oppId, "Quote Packet", name, quotePdf, "application/pdf");
+        if (!x.attached) throw new Error(x.error);
+      });
+      await step("Attach unsigned quote to the contact", async () => {
+        await ghl.ensureField("Quote Packet", "FILE_UPLOAD", "contact");
+        const x = await ghl.attachContactFile(contactId, "Quote Packet", name, quotePdf, "application/pdf");
+        if (!x.attached) throw new Error(x.error);
+      });
+    }
+    const noteLines = [
+      d.leadNotes || d.notes ? `Lead (in-home quote${d.price ? ` ${money(d.price)}` : ""}): ${d.leadNotes || d.notes}` : "",
+      d.followUpDate ? `Follow up on ${prettyDay(d.followUpDate)}.` : "",
+      quoteLink ? `Unsigned quote copy: ${quoteLink}` : "",
+    ].filter(Boolean);
+    if (noteLines.length) await step("Add note", () => ghl.addNote(contactId, noteLines.join("\n")));
     return { log, contactId, oppId, missing, stage: sales?.stageName };
   }
   // Deal: close out the sales opportunity, open one in the Deal Pipeline
@@ -134,6 +182,17 @@ function dealErrors(d, photoCount) {
   return e;
 }
 
+function customerText(d) {
+  const phone = env("REP_PHONE");
+  return [
+    `Hi ${d.customer.first},`, "",
+    "Thank you for choosing HomePro Mobility. Your signed agreement is attached for your records.", "",
+    `Contract price: ${money(d.price)}`, `Deposit: ${money(d.deposit)}`, `Balance due: ${money(balance(d))} (${d.payType})`, `Install date: ${d.installDate || "TBD"}`, "",
+    `If anything looks off or you have a question, reply to this email${phone ? ` or call me at ${phone}` : ""}.`, "",
+    "CJ Dinsmore", "HomePro Mobility",
+  ].join("\n");
+}
+
 async function handleDeal(req, b, previewOnly) {
   const d = { ...b.deal, date: b.deal?.date || todayET() };
   const ph = await loadPhotos(b.photos);
@@ -157,8 +216,19 @@ async function handleDeal(req, b, previewOnly) {
     email = { ok: true, to: recipients(), subject, test: r.test };
   } catch (e) { email = { ok: false, error: String(e.message || e).slice(0, 300) }; }
   d._emailed = email.ok;
+  // The customer's own copy: the signed agreement only, in a separate email.
+  let customerCopy = { ok: false, skipped: "No customer email on file" }, copyKey = null;
+  if (d.customer.email) {
+    try {
+      const copy = await buildCustomerCopy(d);
+      copyKey = (await saveFile(req, `${safe(d.jobNumber)}/${Date.now()}-customer-copy.pdf`, `HomePro Agreement ${lastName(d)}.pdf`, copy).catch(() => null))?.key || null;
+      const r = await sendCustomerCopy({ to: d.customer.email, subject: "Your HomePro Mobility agreement", filename: `HomePro Agreement ${safe(lastName(d))}.pdf`, pdf: copy, text: customerText(d) });
+      customerCopy = { ok: true, to: d.customer.email, test: r.test };
+    } catch (e) { customerCopy = { ok: false, to: d.customer.email, error: String(e.message || e).slice(0, 300) }; }
+  }
   const g = await syncGhl(d, "deal", { packetPdf: pdf, packetLink: link });
-  return json({ ok: true, email, link, packetKey: saved?.key || null, subject, oppId: g.oppId || null, ghl: g });
+  if (customerCopy.ok && g.contactId) await ghl.addNote(g.contactId, `Signed agreement emailed to the customer at ${d.customer.email}.`).catch(() => {});
+  return json({ ok: true, email, customerCopy, customerCopyKey: copyKey, link, packetKey: saved?.key || null, subject, oppId: g.oppId || null, ghl: g });
 }
 
 async function serveFile(url) {
@@ -190,6 +260,7 @@ export default async (req) => {
       extras: Object.fromEntries(Object.entries(EXTRAS).map(([k, v]) => [k, { label: v.label, qty: !!v.qty }])),
       grabBars: Object.keys(GRAB_BARS).map(Number),
       smsConsentText: SMS_CONSENT_TEXT,
+      followUpChoices: [{ label: "Tomorrow", days: 1 }, { label: "In 3 days", days: 3 }, { label: "In 1 week", days: 7 }, { label: "In 2 weeks", days: 14 }],
     });
     if (path === "/contacts") { const q = (url.searchParams.get("q") || "").trim(); return json({ contacts: q.length < 2 ? [] : await ghl.searchContacts(q) }); }
     if (path === "/photo" && req.method === "POST") {
@@ -203,8 +274,17 @@ export default async (req) => {
       const d = { ...body.deal, date: body.deal?.date || todayET() };
       if (!d.customer?.first || !d.customer?.last) return fail("Enter the customer's first and last name");
       if (!d.customer?.phone && !d.customer?.email) return fail("Enter a phone number or email");
-      const g = await syncGhl(d, "lead");
-      return json({ ok: true, ghl: g });
+      if (d.followUpDate && (!isDay(d.followUpDate) || d.followUpDate < todayET())) return fail("Pick a follow-up day that is today or later");
+      // Unsigned copy of the paperwork, when enough is filled in to be worth keeping.
+      let quotePdf = null, quote = null, quoteError = null;
+      if (hasQuoteContent(d)) {
+        try {
+          quotePdf = await buildQuotePacket(d, { photos: await loadPhotos(body.photos) });
+          quote = await saveQuote(req, d, quotePdf);
+        } catch (e) { quoteError = String(e.message || e).slice(0, 300); }
+      }
+      const g = await syncGhl(d, "lead", { quotePdf, quoteLink: quote?.link });
+      return json({ ok: true, ghl: g, link: quote?.link || null, quoteError, followUp: d.followUpDate ? { date: d.followUpDate, label: prettyDay(d.followUpDate) } : null });
     }
     if (path === "/deal" && req.method === "POST") return await handleDeal(req, body, false);
     if (path === "/debug/opp") {
@@ -227,7 +307,15 @@ export default async (req) => {
         await sendPacket({ subject, filename: e.metadata?.name || "packet.pdf", pdf: Buffer.from(e.data), text: `${subject}\n\nAttached: signed agreement, order sheet and staircase photos.\n\nCJ Dinsmore\nHomePro Mobility` });
       } catch (err) { return json({ ok: false, error: String(err.message || err).slice(0, 300) }); }
       if (body.oppId) await ghl.updateOpp(body.oppId, { fieldsByName: { "Packet Emailed": "Yes" } }).catch(() => {});
-      return json({ ok: true, subject, to: recipients() });
+      let customerCopy = null;
+      if (body.customerCopyKey && body.customerEmail) {
+        const c = await packets().getWithMetadata(String(body.customerCopyKey), { type: "arrayBuffer" });
+        if (c) {
+          try { await sendCustomerCopy({ to: String(body.customerEmail), subject: "Your HomePro Mobility agreement", filename: c.metadata?.name || "HomePro Agreement.pdf", pdf: Buffer.from(c.data), text: String(body.customerText || "Your signed HomePro Mobility agreement is attached for your records.\n\nCJ Dinsmore\nHomePro Mobility") }); customerCopy = { ok: true, to: String(body.customerEmail) }; }
+          catch (err) { customerCopy = { ok: false, to: String(body.customerEmail), error: String(err.message || err).slice(0, 300) }; }
+        }
+      }
+      return json({ ok: true, subject, to: recipients(), customerCopy });
     }
     if (path === "/preview" && req.method === "POST") return await handleDeal(req, body, true);
     return fail("Not found", 404);
